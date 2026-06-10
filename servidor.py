@@ -30,7 +30,6 @@ async def handler(websocket, path):
                 cliente_id_original = dados.get("id")
                 cliente_id_limpo = limpar_id(cliente_id_original)
                 
-                # Salva o WebSocket associado ao ID limpo
                 conexoes[cliente_id_limpo] = websocket
                 
                 print(f"✅ Dispositivo Conectado: {cliente_id_original} (Limpo: {cliente_id_limpo})")
@@ -44,12 +43,11 @@ async def handler(websocket, path):
             # 2. SOLICITAÇÃO DE ACESSO (ENCAMINHAMENTO)
             elif tipo == "pedir_permissao":
                 alvo_id = limpar_id(dados.get("alvo_id"))
-                tecnico_id = dados.get("tecnico_id") # Mantém o original para exibição na UI
+                tecnico_id = dados.get("tecnico_id")
                 
                 print(f"🔍 {tecnico_id} está solicitando controle da máquina {dados.get('alvo_id')}")
                 
                 if alvo_id in conexoes:
-                    # Encaminha o pedido de permissão exatamente como o cliente espera receber
                     await conexoes[alvo_id].send(json.dumps({
                         "tipo": "pedido_permissao",
                         "tecnico_id": tecnico_id
@@ -73,7 +71,6 @@ async def handler(websocket, path):
                 print(f"📣 Resposta do Alvo {alvo_id_original}: {'AUTORIZADO' if aceito else 'RECUSADO'}")
                 
                 if tecnico_id_limpo in conexoes:
-                    # Envia o resultado de volta para o técnico que solicitou
                     await conexoes[tecnico_id_limpo].send(json.dumps({
                         "tipo": "permissao_resultado",
                         "aceito": aceito,
@@ -81,48 +78,48 @@ async def handler(websocket, path):
                     }))
                     
                     if aceito:
-                        # Vincula os dois IDs em uma sessão ativa de streaming/comandos
                         salas[tecnico_id_limpo] = alvo_id_limpo
                         salas[alvo_id_limpo] = tecnico_id_limpo
                         print(f"🔗 SESSÃO ESTABELECIDA: {tecnico_id_limpo} <-> {alvo_id_limpo}")
             
-            # 4. TRÁFEGO DE STREAMING DE VÍDEO (PIPELINE DE CAPTURA)
+            # 4. TRÁFEGO DE STREAMING DE VÍDEO
             elif tipo == "webrtc_offer":
                 alvo_id_limpo = limpar_id(dados.get("alvo_id"))
-                
                 if alvo_id_limpo in conexoes:
                     await conexoes[alvo_id_limpo].send(json.dumps({
                         "tipo": "webrtc_offer",
                         "frame": dados.get("frame")
                     }))
             
-            # 5. TRÁFEGO DE COMANDOS DE MOUSE E TECLADO
+            # 5. TRÁFEGO DE COMANDOS
             elif tipo == "input":
                 alvo_id_limpo = limpar_id(dados.get("alvo_id"))
-                
                 if alvo_id_limpo in conexoes:
                     await conexoes[alvo_id_limpo].send(json.dumps(dados))
             
-            # 6. ENCERRAMENTO DE SESSÃO VOLUNTÁRIO
+            # 6. ENCERRAMENTO DE SESSÃO
             elif tipo == "fechar_sessao":
-                # Descobre quem solicitou o fechamento e quem é o parceiro dele
                 parceiro_limpo = salas.get(cliente_id_limpo)
                 if parceiro_limpo and parceiro_limpo in conexoes:
                     await conexoes[parceiro_limpo].send(json.dumps({"tipo": "sessao_encerrada"}))
                     if parceiro_limpo in salas: del salas[parceiro_limpo]
                 if cliente_id_limpo in salas: del salas[cliente_id_limpo]
                 print(f"⏹ Sessão encerrada por iniciativa de {cliente_id_original}")
+
+            # ==========================================
+            # 7. NOVA OTIMIZAÇÃO: KEEP-ALIVE (PING/PONG)
+            # ==========================================
+            elif tipo == "ping":
+                # O servidor recebe um "ping" e devolve um "pong" silencioso
+                await websocket.send(json.dumps({"tipo": "pong"}))
                 
     except websockets.exceptions.ConnectionClosed:
         print(f"🔌 Conexão de rede perdida abruptamente: {cliente_id_original}")
     except Exception as e:
         print(f"❌ Erro operacional no processamento do Handler: {e}")
     finally:
-        # Limpeza absoluta ao desconectar para evitar travamentos de memória
         if cliente_id_limpo and cliente_id_limpo in conexoes:
             del conexoes[cliente_id_limpo]
-            
-            # Notifica o parceiro de sessão se houver um ativo
             parceiro_limpo = salas.get(cliente_id_limpo)
             if parceiro_limpo and parceiro_limpo in conexoes:
                 try:
@@ -135,9 +132,8 @@ async def handler(websocket, path):
             print(f"📊 Dispositivos online restantes: {len(conexoes)}")
 
 async def main():
-    # Roda nativamente na porta 10000 do Render de forma assíncrona
-    async with websockets.serve(handler, "0.0.0.0", 10000, max_size=10*1024*1024): # Limite expandido para suportar imagens pesadas
-        print("✅ SERVIDOR CORRIGIDO PRONTO PARA RODAR!")
+    async with websockets.serve(handler, "0.0.0.0", 10000, ping_interval=None, max_size=10*1024*1024):
+        print("✅ SERVIDOR OTIMIZADO COM KEEP-ALIVE PRONTO!")
         await asyncio.Future()
 
 if __name__ == "__main__":
