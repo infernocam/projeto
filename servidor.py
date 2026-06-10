@@ -4,137 +4,141 @@ import websockets
 import time
 from datetime import datetime
 
-print("🚀 SERVIDOR REPDESK RENDER")
+print("🚀 SERVIDOR REPDESK RENDER - MODO HÍBRIDO SINALIZADOR")
 print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-print("="*50)
+print("="*60)
 
-conexoes = {}
-salas = {}
+# Estruturas para gerenciar conexões e sessões ativas
+conexoes = {}  # { "id_limpo": websocket }
+salas = {}     # { "id_origem": "id_destino" } para mapear quem está conectado com quem
+
+def limpar_id(id_bruto):
+    """Remove hífens e espaços para evitar erros de digitação"""
+    return str(id_bruto).replace("-", "").strip() if id_bruto else None
 
 async def handler(websocket, path):
-    cliente_id = None
+    cliente_id_original = None
+    cliente_id_limpo = None
     
     try:
         async for mensagem in websocket:
             dados = json.loads(mensagem)
             tipo = dados.get("tipo")
             
+            # 1. REGISTRO INICIAL DA MÁQUINA
             if tipo == "registrar":
-                cliente_id = dados.get("id")
-                tipo_cliente = dados.get("tipo_cliente")
-                conexoes[cliente_id] = {
-                    "ws": websocket,
-                    "tipo": tipo_cliente,
-                    "conectado_em": time.time()
-                }
-                print(f"✅ Registrado: {cliente_id} ({tipo_cliente})")
-                print(f"📊 Total conexões: {len(conexoes)}")
+                cliente_id_original = dados.get("id")
+                cliente_id_limpo = limpar_id(cliente_id_original)
+                
+                # Salva o WebSocket associado ao ID limpo
+                conexoes[cliente_id_limpo] = websocket
+                
+                print(f"✅ Dispositivo Conectado: {cliente_id_original} (Limpo: {cliente_id_limpo})")
+                print(f"📊 Dispositivos online: {len(conexoes)}")
                 
                 await websocket.send(json.dumps({
                     "tipo": "registro_ok",
-                    "mensagem": "Conectado ao servidor REPDESK"
+                    "mensagem": "Conectado com sucesso ao barramento REPDESK"
                 }))
             
-            elif tipo == "cliente_conectar":
-                servidor_id = dados.get("servidor_id")
-                cliente_id_req = dados.get("cliente_id")
+            # 2. SOLICITAÇÃO DE ACESSO (ENCAMINHAMENTO)
+            elif tipo == "pedir_permissao":
+                alvo_id = limpar_id(dados.get("alvo_id"))
+                tecnico_id = dados.get("tecnico_id") # Mantém o original para exibição na UI
+                tecnico_id_limpo = limpar_id(tecnico_id)
                 
-                print(f"🔍 Cliente {cliente_id_req} procurando servidor {servidor_id}")
+                print(f"🔍 {tecnico_id} está solicitando controle da máquina {dados.get('alvo_id')}")
                 
-                if servidor_id in conexoes and conexoes[servidor_id]["tipo"] == "servidor":
-                    servidor_ws = conexoes[servidor_id]["ws"]
-                    
-                    await servidor_ws.send(json.dumps({
-                        "tipo": "novo_cliente",
-                        "cliente_id": cliente_id_req,
-                        "servidor_id": servidor_id
+                if alvo_id in conexoes:
+                    # Encaminha o pedido de permissão exatamente como o cliente espera receber
+                    await conexoes[alvo_id].send(json.dumps({
+                        "tipo": "pedido_permissao",
+                        "tecnico_id": tecnico_id
                     }))
-                    print(f"📨 Notificação enviada ao servidor {servidor_id}")
+                    print(f"📨 Solicitação entregue para {dados.get('alvo_id')}")
                 else:
                     await websocket.send(json.dumps({
-                        "tipo": "erro",
-                        "msg": f"Servidor {servidor_id} não está online"
+                        "tipo": "permissao_resultado",
+                        "aceito": False,
+                        "mensagem": "Esta estação de trabalho não foi encontrada ou está offline."
                     }))
-                    print(f"❌ Servidor {servidor_id} não encontrado")
+                    print(f"❌ Alvo {dados.get('alvo_id')} não está online.")
             
-            elif tipo == "resposta_conexao":
-                cliente_id_resp = dados.get("cliente_id")
-                servidor_id = dados.get("servidor_id")
+            # 3. RESPOSTA DO MODAL DE SEGURANÇA (AUTORIZAR / RECUSAR)
+            elif tipo == "resposta_permissao":
+                tecnico_id_limpo = limpar_id(dados.get("tecnico_id"))
+                alvo_id_original = dados.get("alvo_id")
+                alvo_id_limpo = limpar_id(alvo_id_original)
                 aceito = dados.get("aceito")
                 
-                print(f"📨 Resposta do servidor {servidor_id} para cliente {cliente_id_resp}: {'ACEITO' if aceito else 'RECUSADO'}")
+                print(f"📣 Resposta do Alvo {alvo_id_original}: {'AUTORIZADO' if aceito else 'RECUSADO'}")
                 
-                if cliente_id_resp in conexoes:
-                    cliente_ws = conexoes[cliente_id_resp]["ws"]
-                    
-                    await cliente_ws.send(json.dumps({
-                        "tipo": "conexao_aceita" if aceito else "conexao_recusada",
-                        "servidor_id": servidor_id,
-                        "cliente_id": cliente_id_resp
+                if tecnico_id_limpo in conexoes:
+                    # Envia o resultado de volta para o técnico que solicitou
+                    await conexoes[tecnico_id_limpo].send(json.dumps({
+                        "tipo": "permissao_resultado",
+                        "aceito": aceito,
+                        "alvo_id": alvo_id_original
                     }))
                     
                     if aceito:
-                        salas[cliente_id_resp] = servidor_id
-                        salas[servidor_id] = cliente_id_resp
-                        print(f"🔗 CONEXÃO ESTABELECIDA: {servidor_id} <-> {cliente_id_resp}")
+                        # Vincula os dois IDs em uma sessão ativa de streaming/comandos
+                        salas[tecnico_id_limpo] = alvo_id_limpo
+                        salas[alvo_id_limpo] = tecnico_id_limpo
+                        print(f"🔗 SESSÃO ESTABELECIDA: {tecnico_id_limpo} <-> {alvo_id_limpo}")
             
-            elif tipo == "comando":
-                destino_id = dados.get("destino_id")
-                origem_id = dados.get("origem_id")
-                comando = dados.get("comando")
+            # 4. TRÁFEGO DE STREAMING DE VÍDEO (PIPELINE DE CAPTURA)
+            elif tipo == "webrtc_offer":
+                alvo_id_limpo = limpar_id(dados.get("alvo_id"))
                 
-                if destino_id in conexoes:
-                    await conexoes[destino_id]["ws"].send(json.dumps({
-                        "tipo": "comando_recebido",
-                        "comando": comando,
-                        "origem_id": origem_id,
-                        "timestamp": time.time()
+                if alvo_id_limpo in conexoes:
+                    await conexoes[alvo_id_limpo].send(json.dumps({
+                        "tipo": "webrtc_offer",
+                        "frame": dados.get("frame")
                     }))
-                    print(f"📡 Comando encaminhado: {comando[:50]}...")
-                else:
-                    print(f"❌ Destino {destino_id} não encontrado")
             
-            elif tipo == "resultado_comando":
-                destino_id = dados.get("destino_id")
-                resultado = dados.get("resultado")
+            # 5. TRÁFEGO DE COMANDOS DE MOUSE E TECLADO
+            elif tipo == "input":
+                alvo_id_limpo = limpar_id(dados.get("alvo_id"))
                 
-                if destino_id in conexoes:
-                    await conexoes[destino_id]["ws"].send(json.dumps({
-                        "tipo": "resultado_comando",
-                        "resultado": resultado
-                    }))
-                    print(f"✅ Resultado enviado para {destino_id}")
+                if alvo_id_limpo in conexoes:
+                    await conexoes[alvo_id_limpo].send(json.dumps(dados))
             
-            elif tipo == "frame":
-                destino_id = dados.get("destino_id")
-                
-                if destino_id in conexoes:
-                    await conexoes[destino_id]["ws"].send(json.dumps({
-                        "tipo": "frame",
-                        "frame": dados.get("frame"),
-                        "qualidade": dados.get("qualidade", 85)
-                    }))
-                    # print(f"📸 Frame enviado para {destino_id}")
-            
-            elif tipo == "ping":
-                await websocket.send(json.dumps({"tipo": "pong"}))
+            # 6. ENCERRAMENTO DE SESSÃO VOLUNTÁRIO
+            elif tipo == "fechar_sessao":
+                # Descobre quem solicitou o fechamento e quem é o parceiro dele
+                parceiro_limpo = salas.get(cliente_id_limpo)
+                if parceiro_limpo and parceiro_limpo in conexoes:
+                    await conexoes[parceiro_limpo].send(json.dumps({"tipo": "sessao_encerrada"}))
+                    if parceiro_limpo in salas: del salas[parceiro_limpo]
+                if cliente_id_limpo in salas: del salas[cliente_id_limpo]
+                print(f"⏹ Sessão encerrada por iniciativa de {cliente_id_original}")
                 
     except websockets.exceptions.ConnectionClosed:
-        print(f"🔌 Conexão fechada: {cliente_id}")
+        print(f"🔌 Conexão de rede perdida abruptamente: {cliente_id_original}")
     except Exception as e:
-        print(f"❌ Erro no handler: {e}")
+        print(f"❌ Erro operacional no processamento do Handler: {e}")
     finally:
-        if cliente_id and cliente_id in conexoes:
-            del conexoes[cliente_id]
-            print(f"👋 Desconectado: {cliente_id}")
-            print(f"📊 Conexões restantes: {len(conexoes)}")
+        # Limpeza absoluta ao desconectar para evitar travamentos de memória
+        if cliente_id_limpo and cliente_id_limpo in conexoes:
+            del conexoes[cliente_id_limpo]
+            
+            # Notifica o parceiro de sessão se houver um ativo
+            parceiro_limpo = salas.get(cliente_id_limpo)
+            if編 parceiro_limpo and編 parceiro_limpo in conexoes:
+                try:
+                    await conexoes[parceiro_limpo].send(json.dumps({"tipo": "sessao_encerrada"}))
+                except: pass
+                if編 parceiro_limpo in salas: del salas[parceiro_limpo]
+            if cliente_id_limpo in salas: del salas[cliente_id_limpo]
+            
+            print(f"👋 Removido do barramento: {cliente_id_original}")
+            print(f"📊 Dispositivos online restantes: {len(conexoes)}")
 
 async def main():
-    async with websockets.serve(handler, "0.0.0.0", 10000):
-        print("✅ SERVIDOR RODANDO!")
-        print("🌍 URL: wss://projeto-43j6.onrender.com")
-        print("📡 Porta interna: 10000")
-        print("="*50)
+    # Roda nativamente na porta 10000 do Render de forma assíncrona
+    async with websockets.serve(handler, "0.0.0.0", 10000, max_size=10*1024*1024): # Limite expandido para suportar imagens pesadas
+        print("✅ SERVIDOR CORRIGIDO PRONTO PARA RODAR!")
         await asyncio.Future()
 
 if __name__ == "__main__":
