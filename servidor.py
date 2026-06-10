@@ -45,7 +45,6 @@ async def handler(websocket, path):
             elif tipo == "pedir_permissao":
                 alvo_id = limpar_id(dados.get("alvo_id"))
                 tecnico_id = dados.get("tecnico_id") # Mantém o original para exibição na UI
-                tecnico_id_limpo = limpar_id(tecnico_id)
                 
                 print(f"🔍 {tecnico_id} está solicitando controle da máquina {dados.get('alvo_id')}")
                 
@@ -125,11 +124,11 @@ async def handler(websocket, path):
             
             # Notifica o parceiro de sessão se houver um ativo
             parceiro_limpo = salas.get(cliente_id_limpo)
-            if編 parceiro_limpo and編 parceiro_limpo in conexoes:
+            if parceiro_limpo and parceiro_limpo in conexoes:
                 try:
                     await conexoes[parceiro_limpo].send(json.dumps({"tipo": "sessao_encerrada"}))
                 except: pass
-                if編 parceiro_limpo in salas: del salas[parceiro_limpo]
+                if parceiro_limpo in salas: del salas[parceiro_limpo]
             if cliente_id_limpo in salas: del salas[cliente_id_limpo]
             
             print(f"👋 Removido do barramento: {cliente_id_original}")
